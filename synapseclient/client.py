@@ -1809,7 +1809,7 @@ class Synapse:
 
         :returns: A file info dictionary with keys path, cacheDir, files
         """
-
+        print(entity.md5)
         if submission is not None:
             url = '%s/evaluation/submission/%s/file/%s' % (self.repoEndpoint, id_of(submission),
                                                            entity['dataFileHandleId'])
