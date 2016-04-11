@@ -48,6 +48,9 @@ class SynapseUnmetAccessRestrictions(SynapseError):
 class SynapseProvenanceError(SynapseError):
     """Incorrect usage of provenance objects."""
 
+class SynapseMD5MissmatchError(SynapseError):
+    """File downloaded does not have a matching md5."""
+
 class SynapseHTTPError(SynapseError, requests.exceptions.HTTPError):
     """Wraps recognized HTTP errors.  See `HTTPError <http://docs.python-requests.org/en/latest/api/?highlight=exceptions#requests.exceptions.HTTPError>`_"""
 

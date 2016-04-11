@@ -59,7 +59,7 @@ ISO_FORMAT_MICROS = "%Y-%m-%dT%H:%M:%S.%fZ"
 GB = 2**30
 MB = 2**20
 KB = 2**10
-BUFFER_SIZE = 8*KB
+BUFFER_SIZE = 2*MB
 
 
 def md5_for_file(filename, block_size=2**20):
@@ -83,38 +83,45 @@ def md5_for_file(filename, block_size=2**20):
     return(md5)
 
 
-def download_file(url, localFilepath=None):
+def stream_http_to_file(url, destination, md5='', headers=None):
     """
-    Downloads a remote file.
+    Downloads a remote file from a url supported by requests 
+    library (http, https)
 
-    :param localFilePath: May be None, in which case a temporary file is created
+    :param url: URL of file to be downloaded
+    :param destination: path where output will be stored
+    :param md5: (optional) md5 hash of file to be downloaded.
+                    If the download does not match the hash a
+                    SynapseMD5DownloadError is raised.
+    :param headers: (optional) Headers passed along with the HTTP GET operation
 
-    :returns: localFilePath
+    :returns: destination path
     """
+    #TODO add support for username/password
+    response = requests.get(url, stream=True, headers=headers)
+    ## get filename from content-disposition, if we don't have it already
+    if os.path.isdir(destination):
+        filename = extract_filename(
+            content_disposition_header=response.headers.get('content-disposition', None),
+            default_filename=guess_file_name(url))
+        destination = os.path.join(destination, filename)
 
-    f = None
-    try:
-        if localFilepath:
-            dir = os.path.dirname(localFilepath)
-            if not os.path.exists(dir):
-                os.makedirs(dir)
-            f = open(localFilepath, 'wb')
-        else:
-            f = tempfile.NamedTemporaryFile(delete=False)
-            localFilepath = f.name
-
-        r = requests.get(url, stream=True)
-        toBeTransferred = float(r.headers['content-length'])
-        for nChunks, chunk in enumerate(r.iter_content(chunk_size=1024*10)):
-            if chunk:
-                f.write(chunk)
-                printTransferProgress(nChunks*1024*10, toBeTransferred)
-    finally:
-        if f:
-            f.close()
-            printTransferProgress(toBeTransferred, toBeTransferred)
-
-    return localFilepath
+    toBeTransferred = float(response.headers.get('content-length', -1))
+    transferred = 0
+    sig = hashlib.md5()
+    with open(destination, 'wb') as fd:
+        for nChunks, chunk in enumerate(response.iter_content(BUFFER_SIZE)):
+            fd.write(chunk)
+            sig.update(chunk)
+            transferred += len(chunk)
+            printTransferProgress(transferred, toBeTransferred,
+                                        'Downloading ', os.path.basename(destination))
+    printTransferProgress(transferred, transferred, 'Downloaded  ',
+                                os.path.basename(destination))
+    if (md5 is not None) and (md5!=''):
+        if md5 != sig.hexdigest():
+            raise SynapseMD5MismatchError
+    return os.path.abspath(destination)
 
 
 def extract_filename(content_disposition_header, default_filename=None):

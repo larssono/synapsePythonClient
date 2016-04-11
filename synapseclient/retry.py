@@ -11,8 +11,9 @@ import time
 from synapseclient.utils import _is_json
 
 
-def _with_retry(function, verbose=False, \
-        retry_status_codes=[429, 502, 503, 504], retry_errors=[], retry_exceptions=[], \
+def _with_retry(function, verbose=False, 
+                retry_status_codes=[429, 502, 503, 504],
+                retry_errors=[], retry_exceptions=[], \
         retries=3, wait=1, back_off=2, max_wait=30):
     """
     Retries the given function under certain conditions.
@@ -30,7 +31,7 @@ def _with_retry(function, verbose=False, \
     Example::
         
         def foo(a, b, c): return [a, b, c]
-        result = self._with_retry(lambda: foo("1", "2", "3"), **STANDARD_RETRY_PARAMS)
+        result = _with_retry(lambda: foo("1", "2", "3"), **STANDARD_RETRY_PARAMS)
     """
     
     # Retry until we succeed or run out of tries

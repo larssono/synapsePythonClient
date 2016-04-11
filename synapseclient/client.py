@@ -98,7 +98,6 @@ STAGING_ENDPOINTS    = {'repoEndpoint':'https://repo-staging.prod.sagebase.org/r
 
 CONFIG_FILE = os.path.join(os.path.expanduser('~'), '.synapseConfig')
 SESSION_FILENAME = '.session'
-FILE_BUFFER_SIZE = 2*MB
 CHUNK_SIZE = 5*MB
 QUERY_LIMIT = 1000
 CHUNK_UPLOAD_POLL_INTERVAL = 1 # second
@@ -1809,7 +1808,7 @@ class Synapse:
 
         :returns: A file info dictionary with keys path, cacheDir, files
         """
-        print(entity.md5)
+        print('MD5', entity.md5, '***')
         if submission is not None:
             url = '%s/evaluation/submission/%s/file/%s' % (self.repoEndpoint, id_of(submission),
                                                            entity['dataFileHandleId'])
@@ -1824,12 +1823,19 @@ class Synapse:
         except OSError as exception:
             if exception.errno != os.errno.EEXIST:
                 raise
-        return self._downloadFile(url, destination)
+        return self._downloadFile(url, destination, md5=entity.md5)
 
 
-    def _downloadFile(self, url, destination):
+    def _downloadFile(self, url, destination, md5=''):
         """
-        Download a file from a URL to a the given file path.
+        Download a file from a URL to a the given file path by first following any
+        redirects.
+
+        :param url: a url where file will be downloaded from
+        :param destination: path where output will be stored
+        :param md5: (optional) md5 hash of file to be downloaded.
+                    If the download does not match the hash a
+                    SynapseMD5DownloadError is raised.
 
         :returns: A file info dictionary with keys path, cacheDir, files
         """
@@ -1839,37 +1845,34 @@ class Synapse:
                      'files': [None] if destination is None else [os.path.basename(destination)],
                      'cacheDir': None if destination is None else os.path.dirname(destination) }
 
-        # We expect to be redirected to a signed S3 URL or externalURL
-        #The assumption is wrong - we always try to read either the outer or inner requests.get
-        #but sometimes we don't have something to read.  I.e. when the type is ftp at which point
-        #we still set the cache and filepath based on destination which is wrong because nothing was fetched
-        response = _with_retry(lambda: requests.get(url, headers=self._generateSignedHeaders(url), allow_redirects=False), verbose=self.debug, **STANDARD_RETRY_PARAMS)
-
-        if response.status_code in [301,302,303,307,308]:
-            url = response.headers['location']
-            scheme = urlparse(url).scheme
-            # If it's a file URL, turn it into a path and return it
-            if scheme == 'file':
-                pathinfo = utils.file_url_to_path(url, verify_exists=True)
-                if 'path' not in pathinfo:
-                    raise IOError("Could not download non-existent file (%s)." % url)
-            elif scheme == 'sftp':
-                destination = self._sftpDownloadFile(url, destination)
-                return returnDict(destination)
-            elif scheme == 'http' or scheme == 'https':
-                #TODO add support for username/password
-                response = requests.get(url, headers=self._generateSignedHeaders(url, {}), stream=True)
-                ## get filename from content-disposition, if we don't have it already
-                if os.path.isdir(destination):
-                    filename = utils.extract_filename(
-                        content_disposition_header=response.headers.get('content-disposition', None),
-                        default_filename=utils.guess_file_name(url))
-                    destination = os.path.join(destination, filename)
-
-            #TODO LARSSON add support of ftp download
+        #Follow all redirects as necessary
+        while True:
+            response = _with_retry(lambda: requests.get(url, headers=self._generateSignedHeaders(url), allow_redirects=False),
+                                   verbose=self.debug, **STANDARD_RETRY_PARAMS)
+            print(response)
+            if response.status_code in [301,302,303,307,308]:
+                url = response.headers['location']
+                scheme = urlparse(url).scheme
             else:
-                sys.stderr.write('Unable to download this type of URL.  ')
-                return returnDict(None)
+                break
+        #Determine what to do based on the scheme (protocol of the url)
+        if scheme == 'file':   #If it's a file URL, turn it into a path and return it
+            pathinfo = utils.file_url_to_path(url, verify_exists=True)
+            #TODO verify that the destination gets set
+            if 'path' not in pathinfo:
+                raise IOError("Could not download non-existent file (%s)." % url)
+        elif scheme == 'sftp': 
+            destination = self._sftpDownloadFile(url, destination)
+            return returnDict(destination)
+        elif scheme == 'http' or scheme == 'https':
+            #Assume that it is a S3
+            headers = self._generateSignedHeaders(url, {})
+            print(headers)
+            destination = utils.stream_http_to_file(url, destination, md5, headers)
+        #TODO LARSSON add support of ftp download
+        else:
+            sys.stderr.write('Unable to download this type of URL.  ')
+            return returnDict(None)
         try:
             exceptions._raise_for_status(response, verbose=self.debug)
         except SynapseHTTPError as err:
@@ -1877,22 +1880,7 @@ class Synapse:
                 raise SynapseError("Could not download the file at %s" % url)
             raise
 
-        # Stream the file to disk
-        if 'content-length' in response.headers:
-            toBeTransferred = float(response.headers['content-length'])
-        else:
-            toBeTransferred = -1
-        transferred = 0
-        sig = hashlib.md5()
-        with open(destination, 'wb') as fd:
-            for nChunks, chunk in enumerate(response.iter_content(FILE_BUFFER_SIZE)):
-                fd.write(chunk)
-                sig.update(chunk)
-                transferred += len(chunk)
-                utils.printTransferProgress(transferred, toBeTransferred, 'Downloading ', os.path.basename(destination))
-            utils.printTransferProgress(transferred, transferred, 'Downloaded  ', os.path.basename(destination))
-        sig.hexdigest()
-        destination = os.path.abspath(destination)
+        #TODO add call to actual download
         return returnDict(destination)
 
 
@@ -2097,7 +2085,7 @@ class Synapse:
         return urlunparse(parsedURL)
 
 
-    def _sftpDownloadFile(self, url, localFilepath=None,  username=None, password=None):
+    def _sftpDownloadFile(self, url, localFilepath=None,  username=None, password=None, md5=''):
         """
         Performs download of a file from an sftp server.
 
@@ -2108,6 +2096,8 @@ class Synapse:
         :param username: username on server
 
         :param password: password for authentication on  server
+        
+        :param md5: md5 of file to be downloaded
 
         :returns: localFilePath
 
@@ -2131,6 +2121,7 @@ class Synapse:
         if not os.path.exists(dir):
             os.makedirs(dir)
 
+        #TODO VErify md5 of downloaded file.
         #Download file
         with pysftp.Connection(parsedURL.hostname, username=username, password=password) as sftp:
             sftp.get(path, localFilepath, preserve_mtime=True, callback=utils.printTransferProgress)
@@ -2591,6 +2582,7 @@ class Synapse:
             if not os.path.exists(cache_dir):
                 os.makedirs(cache_dir)
 
+            #TODO with support for md5 with fix to PLFM-3794
             fileInfo = self._downloadFile(url, cache_dir)
 
             self.cache.add(wiki.markdownFileHandleId, fileInfo['path'])
@@ -2672,6 +2664,7 @@ class Synapse:
             destination = filename
         elif os.path.isdir(destination):
             destination = os.path.join(destination, filename)
+        #TODO with support for md5 with fix to PLFM-3794
         return self._downloadFile(url, destination)
 
     def getWikiAttachments(self, wiki):
@@ -2966,6 +2959,7 @@ class Synapse:
         if cached_file_path is not None:
             return (download_from_table_result, {'path':cached_file_path})
         else:
+            #TODO with support for md5 with fix to PLFM-3794
             url = '%s/fileHandle/%s/url' % (self.fileHandleEndpoint, file_handle_id)
             cache_dir = self.cache.get_cache_dir(file_handle_id)
             if not os.path.exists(cache_dir):
@@ -3081,6 +3075,7 @@ class Synapse:
                     columnId=column_id,
                     rowId=rowId,
                     versionNumber=versionNumber)
+            #TODO with support for md5 with fix to PLFM-3794
             file_info = self._downloadFile(url, downloadLocation)
 
             self.cache.add(file_handle_id, file_info['path'])
@@ -3187,6 +3182,7 @@ class Synapse:
             zipfilepath = os.path.join(temp_dir,"table_file_download.zip")
             url = "%s/fileHandle/%s/url" % (self.fileHandleEndpoint, response['resultZipFileHandleId'])
             try:
+                #TODO with support for md5 with fix to PLFM-3794
                 self._downloadFile(url, destination=zipfilepath)
 
                 ## TODO handle case when no zip file is returned

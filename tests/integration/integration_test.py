@@ -252,10 +252,11 @@ def test_uploadFileEntity():
     assert filecmp.cmp(fname, entity['path'])
 
 
-def test_downloadFile():
+def test_utils_stream_http_to_file():
     # See if the a "wget" works
-    filename = utils.download_file("http://dev-versions.synapse.sagebase.org/sage_bionetworks_logo_274x128.png")
-    schedule_for_cleanup(filename)
+    f = tempfile.NamedTemporaryFile(delete=False)
+    schedule_for_cleanup(f.name)
+    filename = utils.stream_http_to_file("http://dev-versions.synapse.sagebase.org/sage_bionetworks_logo_274x128.png", f.name)
     assert os.path.exists(filename)
 
 
